@@ -1,25 +1,73 @@
 // =============================================================
 // sockets/chatSocket.js
-//
-// Maneja todos los eventos Socket.IO del chat en tiempo real.
-// Usa el mismo chatService que las rutas HTTP —
-// cuando la BD esté lista, el service cambia y los sockets
-// automáticamente empiezan a persistir sin tocar este archivo.
 // =============================================================
 
 const chatService = require("../services/chatService");
 
-// Mapa en memoria para presencia (socket.id → userId).
-// En fase 2 se puede complementar con la tabla usuarios, pero
-// la presencia siempre depende del socket, no solo de la BD.
 const usuariosConectados = new Map();
+
+// ── Lista de palabras censuradas ──────────────────────────────
+const PALABRAS_CENSURADAS = [
+  "conchetumadre",
+  "conchatumare",
+  "hijo de puta",
+  "malparido",
+  "puta",
+  "idiota",
+  "basura",
+  "estupido",
+  "perro",
+  "maricon",
+  "pendejo",
+  "cagon de mierda",
+  "mierda",
+  "puto",
+  "huevon",
+  "puta madre",
+  "carajo",
+  "cabro",
+  "wueon",
+  "sonzo",
+  "tarado",
+  "imbecil",
+  "baboso",
+  "mongol",
+  "cojudo",
+  "gil",
+  "tarao",
+  "atorrante",
+  "me llegas al pincho",
+  "desahuevate",
+  "rosquete",
+  "pastrulo",
+  "pastelero",
+  "drogo",
+  "fumon",
+  "fumeque",
+  "marihuanero",
+  "chupapinga",
+  "mostro",
+  "careperro",
+  "caremuerto",
+  "cachudo",
+  "venado",
+  "terruco",
+];
+
+function censurar(texto) {
+  let resultado = texto;
+  PALABRAS_CENSURADAS.forEach((palabra) => {
+    const regex = new RegExp(palabra, "gi");
+    resultado = resultado.replace(regex, "*".repeat(palabra.length));
+  });
+  return resultado;
+}
 
 module.exports = function registrarSocketsChat(io) {
   io.on("connection", (socket) => {
     console.log(`[socket] conectado: ${socket.id}`);
 
     // ── 1. El usuario se identifica al conectar ──────────────
-    //    El frontend emite: socket.emit("usuario:conectar", { userId, nombre })
     socket.on("usuario:conectar", async ({ userId, nombre }) => {
       socket.data.userId = userId;
       socket.data.nombre = nombre;
@@ -27,14 +75,12 @@ module.exports = function registrarSocketsChat(io) {
 
       await chatService.actualizarPresencia(userId, "En línea");
 
-      // Notifica a todos los demás que este usuario está online
       socket.broadcast.emit("presencia:cambio", {
         userId,
         nombre,
         estado: "En línea",
       });
 
-      // Envía al usuario su lista de chats al conectarse
       const chats = await chatService.getChatsDeUsuario(userId);
       socket.emit("chat:listar", { chats });
 
@@ -42,9 +88,7 @@ module.exports = function registrarSocketsChat(io) {
     });
 
     // ── 2. El usuario abre un chat (se une a la room) ────────
-    //    El frontend emite: socket.emit("chat:unirse", { chatId })
     socket.on("chat:unirse", async ({ chatId }) => {
-      // Sale de rooms anteriores de chat (no del propio socket)
       const rooms = [...socket.rooms].filter(
         (r) => r !== socket.id && r.startsWith("chat_")
       );
@@ -53,7 +97,6 @@ module.exports = function registrarSocketsChat(io) {
       socket.join(`chat_${chatId}`);
       socket.data.chatActivo = chatId;
 
-      // Envía el historial de mensajes al usuario que abre el chat
       const mensajes = await chatService.getMensajes(chatId);
       socket.emit("mensajes:historial", { chatId, mensajes });
 
@@ -61,8 +104,6 @@ module.exports = function registrarSocketsChat(io) {
     });
 
     // ── 3. El usuario envía un mensaje ───────────────────────
-    //    El frontend emite:
-    //    socket.emit("mensaje:enviar", { chatId, texto, remitente })
     socket.on("mensaje:enviar", async ({ chatId, texto, remitente }) => {
       if (!texto || !texto.trim()) return;
 
@@ -71,17 +112,15 @@ module.exports = function registrarSocketsChat(io) {
 
       const mensaje = await chatService.guardarMensaje({
         chatId,
-        texto: texto.trim(),
+        texto: censurar(texto.trim()), // ← filtro aplicado aquí
         remitenteId: userId,
         remitente: nombreRemitente,
       });
 
-      // Emite el mensaje a todos en la room del chat (incluye al emisor)
       io.to(`chat_${chatId}`).emit("mensaje:nuevo", mensaje);
     });
 
     // ── 4. Indicador "está escribiendo" ──────────────────────
-    //    El frontend emite: socket.emit("escribiendo:inicio", { chatId })
     socket.on("escribiendo:inicio", ({ chatId }) => {
       socket.to(`chat_${chatId}`).emit("escribiendo", {
         chatId,
@@ -91,7 +130,6 @@ module.exports = function registrarSocketsChat(io) {
       });
     });
 
-    //    El frontend emite: socket.emit("escribiendo:fin", { chatId })
     socket.on("escribiendo:fin", ({ chatId }) => {
       socket.to(`chat_${chatId}`).emit("escribiendo", {
         chatId,
@@ -102,13 +140,9 @@ module.exports = function registrarSocketsChat(io) {
     });
 
     // ── 5. Marcar mensajes como vistos ───────────────────────
-    //    El frontend emite:
-    //    socket.emit("mensaje:marcarVisto", { chatId })
     socket.on("mensaje:marcarVisto", async ({ chatId }) => {
       const userId = socket.data.userId;
-      // Fase 2: await chatService.marcarComoVisto(chatId, userId);
 
-      // Notifica al otro participante que sus mensajes fueron vistos
       socket.to(`chat_${chatId}`).emit("mensaje:visto", {
         chatId,
         userId,

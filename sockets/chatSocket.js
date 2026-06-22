@@ -67,7 +67,6 @@ module.exports = function registrarSocketsChat(io) {
   io.on("connection", (socket) => {
     console.log(`[socket] conectado: ${socket.id}`);
 
-    // ── 1. El usuario se identifica al conectar ──────────────
     socket.on("usuario:conectar", async ({ userId, nombre }) => {
       socket.data.userId = userId;
       socket.data.nombre = nombre;
@@ -87,7 +86,6 @@ module.exports = function registrarSocketsChat(io) {
       console.log(`[socket] usuario conectado: ${nombre} (${userId})`);
     });
 
-    // ── 2. El usuario abre un chat (se une a la room) ────────
     socket.on("chat:unirse", async ({ chatId }) => {
       const rooms = [...socket.rooms].filter(
         (r) => r !== socket.id && r.startsWith("chat_")
@@ -103,7 +101,6 @@ module.exports = function registrarSocketsChat(io) {
       console.log(`[socket] ${socket.data.nombre} unido a chat_${chatId}`);
     });
 
-    // ── 3. El usuario envía un mensaje ───────────────────────
     socket.on("mensaje:enviar", async ({ chatId, texto, remitente }) => {
       if (!texto || !texto.trim()) return;
 
@@ -112,7 +109,7 @@ module.exports = function registrarSocketsChat(io) {
 
       const mensaje = await chatService.guardarMensaje({
         chatId,
-        texto: censurar(texto.trim()), // ← filtro aplicado aquí
+        texto: censurar(texto.trim()),
         remitenteId: userId,
         remitente: nombreRemitente,
       });
@@ -120,7 +117,6 @@ module.exports = function registrarSocketsChat(io) {
       io.to(`chat_${chatId}`).emit("mensaje:nuevo", mensaje);
     });
 
-    // ── 4. Indicador "está escribiendo" ──────────────────────
     socket.on("escribiendo:inicio", ({ chatId }) => {
       socket.to(`chat_${chatId}`).emit("escribiendo", {
         chatId,
@@ -139,17 +135,31 @@ module.exports = function registrarSocketsChat(io) {
       });
     });
 
-    // ── 5. Marcar mensajes como vistos ───────────────────────
     socket.on("mensaje:marcarVisto", async ({ chatId }) => {
       const userId = socket.data.userId;
-
       socket.to(`chat_${chatId}`).emit("mensaje:visto", {
         chatId,
         userId,
       });
     });
 
-    // ── 6. Desconexión ───────────────────────────────────────
+    // ── Reportar mensaje ─────────────────────────────────────
+    socket.on("mensaje:reportar", ({ msgId, chatId }) => {
+      console.log(`[reporte] msgId: ${msgId}, chatId: ${chatId}`);
+      const resultado = chatService.reportarMensaje(msgId, chatId);
+      console.log(`[reporte] resultado:`, resultado);
+
+      if (resultado.eliminado) {
+        io.to(`chat_${chatId}`).emit("mensaje:eliminado", {
+          msgId,
+          chatId,
+          textoReemplazado: "⚠️ Mensaje eliminado por límite de reportes",
+        });
+      } else {
+        socket.emit("reporte:confirmado", { msgId, reportes: resultado.reportes });
+      }
+    });
+
     socket.on("disconnect", async () => {
       const { userId, nombre } = socket.data;
       usuariosConectados.delete(socket.id);

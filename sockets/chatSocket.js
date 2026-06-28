@@ -181,6 +181,16 @@ module.exports = function registrarSocketsChat(io) {
         });
       }
     });
+    // ── Reaccionar a mensaje ─────────────────────────────────────
+    socket.on("mensaje:reaccionar", ({ msgId, chatId, emoji, userId }) => {
+      console.log(`[reaccion] msgId: ${msgId}, emoji: ${emoji}`);
+      io.to(`chat_${chatId}`).emit("mensaje:reaccion", {
+        msgId,
+        chatId,
+        emoji,
+        userId,
+      });
+    });
     socket.on("disconnect", async () => {
       const { userId, nombre } = socket.data;
       usuariosConectados.delete(socket.id);

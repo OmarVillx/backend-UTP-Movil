@@ -159,7 +159,28 @@ module.exports = function registrarSocketsChat(io) {
         socket.emit("reporte:confirmado", { msgId, reportes: resultado.reportes });
       }
     });
+    // ── Eliminar mensaje ─────────────────────────────────────────
+    socket.on("mensaje:eliminar", ({ msgId, chatId, paraTodos }) => {
+      const userId = socket.data.userId;
+      console.log(`[eliminar] msgId: ${msgId}, paraTodos: ${paraTodos}`);
 
+      if (paraTodos) {
+        // Notifica a todos en el chat
+        io.to(`chat_${chatId}`).emit("mensaje:eliminadoPorUsuario", {
+          msgId,
+          chatId,
+          texto: "🗑️ Mensaje eliminado",
+        });
+      } else {
+        // Solo notifica al que eliminó
+        socket.emit("mensaje:eliminadoPorUsuario", {
+          msgId,
+          chatId,
+          texto: "🗑️ Mensaje eliminado",
+          soloYo: true,
+        });
+      }
+    });
     socket.on("disconnect", async () => {
       const { userId, nombre } = socket.data;
       usuariosConectados.delete(socket.id);

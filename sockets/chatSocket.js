@@ -5,7 +5,7 @@
 const chatService = require("../services/chatService");
 
 const usuariosConectados = new Map();
-
+const reacciones = new Map(); // ← agrega esta línea
 // ── Lista de palabras censuradas ──────────────────────────────
 const PALABRAS_CENSURADAS = [
   "conchetumadre",
@@ -165,14 +165,12 @@ module.exports = function registrarSocketsChat(io) {
       console.log(`[eliminar] msgId: ${msgId}, paraTodos: ${paraTodos}`);
 
       if (paraTodos) {
-        // Notifica a todos en el chat
         io.to(`chat_${chatId}`).emit("mensaje:eliminadoPorUsuario", {
           msgId,
           chatId,
           texto: "🗑️ Mensaje eliminado",
         });
       } else {
-        // Solo notifica al que eliminó
         socket.emit("mensaje:eliminadoPorUsuario", {
           msgId,
           chatId,
@@ -181,16 +179,32 @@ module.exports = function registrarSocketsChat(io) {
         });
       }
     });
+
     // ── Reaccionar a mensaje ─────────────────────────────────────
     socket.on("mensaje:reaccionar", ({ msgId, chatId, emoji, userId }) => {
-      console.log(`[reaccion] msgId: ${msgId}, emoji: ${emoji}`);
-      io.to(`chat_${chatId}`).emit("mensaje:reaccion", {
-        msgId,
-        chatId,
-        emoji,
-        userId,
-      });
+      const key = `${chatId}_${msgId}_${emoji}`;
+      if (!reacciones.has(key)) reacciones.set(key, new Set());
+
+      const usuarios = reacciones.get(key);
+
+      if (usuarios.has(userId)) {
+        usuarios.delete(userId);
+        io.to(`chat_${chatId}`).emit("mensaje:reaccion", {
+          msgId, chatId, emoji,
+          count: usuarios.size,
+          quitar: true,
+        });
+      } else {
+        usuarios.add(userId);
+        io.to(`chat_${chatId}`).emit("mensaje:reaccion", {
+          msgId, chatId, emoji,
+          count: usuarios.size,
+          quitar: false,
+        });
+      }
     });
+
+    // ── Desconexión ───────────────────────────────────────────────
     socket.on("disconnect", async () => {
       const { userId, nombre } = socket.data;
       usuariosConectados.delete(socket.id);

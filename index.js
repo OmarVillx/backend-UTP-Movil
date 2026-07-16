@@ -94,14 +94,17 @@ app.post("/api/registro", async (req, res) => {
       ]
     );
 
-    // Agregar automáticamente al usuario nuevo al grupo General UTP+ (id_chat = 4)
-    await client.query(
-      `
-      INSERT INTO participantes_chat (id_chat, codigo_usu)
-      VALUES (4, $1)
-      `,
-      [codigo_usu]
-    );
+    // Agregar automáticamente al usuario nuevo a los grupos por defecto
+    const gruposPorDefecto = [4, 5, 6, 7]; // General UTP+, Ing. Sistemas, Gamers UTP, Memes UTP
+    for (const idGrupo of gruposPorDefecto) {
+      await client.query(
+        `
+        INSERT INTO participantes_chat (id_chat, codigo_usu)
+        VALUES ($1, $2)
+        `,
+        [idGrupo, codigo_usu]
+      );
+    }
 
     await client.query("COMMIT");
 

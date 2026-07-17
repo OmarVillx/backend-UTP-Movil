@@ -3,6 +3,7 @@
 // =============================================================
 
 const chatService = require("../services/chatService");
+const pool = require("../db");
 
 const usuariosConectados = new Map();
 const reacciones = new Map(); // ← agrega esta línea

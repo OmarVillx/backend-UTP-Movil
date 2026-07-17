@@ -8,6 +8,7 @@
 require("dotenv").config();
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
+const nodemailer = require("nodemailer");
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -33,12 +34,112 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
 
+// ── Envío de correos (verificación de correo institucional) ──────
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+// Correo institucional: u + 8 dígitos + @utp.edu.pe (mayúsculas o minúsculas)
+const FORMATO_CORREO_UTP = /^u\d{8}@utp\.edu\.pe$/i;
+
+// Guarda los códigos de verificación mientras el servidor sigue corriendo:
+// correo -> { codigo, expira }. No necesita tabla en la BD porque son
+// temporales (5 min) y de un solo uso.
+const otpStore = new Map();
+
+// ── Verificación de correo institucional (paso 1 del registro) ───
+
+// Genera un código de 6 dígitos, lo guarda temporalmente y lo envía por correo.
+app.post("/api/auth/enviar-codigo", async (req, res) => {
+  const correo = (req.body.correo || "").trim().toLowerCase();
+
+  if (!FORMATO_CORREO_UTP.test(correo)) {
+    return res.status(400).json({
+      success: false,
+      error: "Ingresa tu correo institucional (ej. u12345678@utp.edu.pe)",
+    });
+  }
+
+  try {
+    const existente = await pool.query(
+      `SELECT codigo_usu FROM usuarios WHERE LOWER(correo) = $1`,
+      [correo]
+    );
+    if (existente.rows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: "Ya existe una cuenta creada con ese correo. Inicia sesión en vez de crear una nueva.",
+      });
+    }
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+
+  const codigo = Math.floor(100000 + Math.random() * 900000).toString();
+  const expira = Date.now() + 5 * 60 * 1000; // 5 minutos
+  otpStore.set(correo, { codigo, expira });
+
+  try {
+    await transporter.sendMail({
+      from: `"UTP+ Movil" <${process.env.EMAIL_USER}>`,
+      to: correo,
+      subject: "Tu código de verificación - UTP+ Movil",
+      text: `Tu código de verificación es: ${codigo}\n\nExpira en 5 minutos. Si tú no solicitaste esto, ignora este correo.`,
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error enviando correo:", err.message);
+    otpStore.delete(correo);
+    res.status(500).json({
+      success: false,
+      error: "No se pudo enviar el correo. Intenta de nuevo en un momento.",
+    });
+  }
+});
+
+// Confirma el código de 6 dígitos y devuelve el código de estudiante ya
+// extraído del correo (la parte antes de la @), listo para crear la cuenta.
+app.post("/api/auth/verificar-codigo", (req, res) => {
+  const correo = (req.body.correo || "").trim().toLowerCase();
+  const codigo = (req.body.codigo || "").trim();
+
+  const guardado = otpStore.get(correo);
+
+  if (!guardado) {
+    return res.status(400).json({
+      success: false,
+      error: "Primero solicita un código para este correo",
+    });
+  }
+
+  if (Date.now() > guardado.expira) {
+    otpStore.delete(correo);
+    return res.status(400).json({ success: false, error: "El código expiró, solicita uno nuevo" });
+  }
+
+  if (guardado.codigo !== codigo) {
+    return res.status(400).json({ success: false, error: "Código incorrecto" });
+  }
+
+  otpStore.delete(correo); // se usa una sola vez
+
+  res.json({
+    success: true,
+    correo,
+    codigo_estudiante: correo.split("@")[0].toUpperCase(),
+  });
+});
+
 // ── Rutas existentes (no se tocan) ──────────────────────────────
 app.post("/api/registro", async (req, res) => {
-  const { nombre_usuario, genero, intereses, carrera, ciclo, codigo_estudiante, password } = req.body;
+  const { nombre_usuario, genero, intereses, carrera, ciclo, correo, password } = req.body;
 
   const cleanUser = (nombre_usuario || "").trim();
-  const cleanCodigo = (codigo_estudiante || "").trim().toUpperCase();
+  const cleanCorreo = (correo || "").trim().toLowerCase();
 
   if (!cleanUser) {
     return res.status(400).json({
@@ -47,11 +148,11 @@ app.post("/api/registro", async (req, res) => {
     });
   }
 
-  // El código de estudiante debe tener el formato U + 8 dígitos (ej. U12345678)
-  if (!/^U\d{8}$/.test(cleanCodigo)) {
+  // Debe ser un correo institucional ya verificado por OTP (u12345678@utp.edu.pe)
+  if (!FORMATO_CORREO_UTP.test(cleanCorreo)) {
     return res.status(400).json({
       success: false,
-      error: "El código de estudiante debe ser una U seguida de 8 números (ej. U12345678)",
+      error: "Falta verificar tu correo institucional",
     });
   }
 
@@ -81,17 +182,17 @@ app.post("/api/registro", async (req, res) => {
       });
     }
 
-    // 🔒 Un mismo código de estudiante no puede tener dos cuentas
-    const codigoExistente = await client.query(
-      `SELECT codigo_usu FROM usuarios WHERE UPPER(correo) = $1`,
-      [cleanCodigo]
+    // 🔒 Un mismo correo institucional no puede tener dos cuentas
+    const correoExistente = await client.query(
+      `SELECT codigo_usu FROM usuarios WHERE LOWER(correo) = $1`,
+      [cleanCorreo]
     );
 
-    if (codigoExistente.rows.length > 0) {
+    if (correoExistente.rows.length > 0) {
       await client.query("ROLLBACK");
       return res.status(409).json({
         success: false,
-        error: "Ya existe una cuenta creada con ese código de estudiante.",
+        error: "Ya existe una cuenta creada con ese correo institucional.",
       });
     }
 
@@ -120,7 +221,7 @@ app.post("/api/registro", async (req, res) => {
         cleanUser,
         "",
         cleanUser,
-        cleanCodigo,
+        cleanCorreo,
         passwordHash,
         true,
         "activo",
@@ -227,7 +328,11 @@ app.get("/api/perfil/:id", async (req, res) => {
         p.carrera,
         p.ciclo,
         p.genero,
-        p.intereses
+        p.intereses,
+        p.bio,
+        p.estado_actual,
+        p.privado,
+        p.foto_perfil
       FROM usuarios u
       LEFT JOIN perfil_usuario p ON p.codigo_usu = u.codigo_usu
       WHERE u.codigo_usu = $1
@@ -241,6 +346,74 @@ app.get("/api/perfil/:id", async (req, res) => {
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Actualiza el perfil del usuario (nombre, bio, carrera, ciclo, genero, intereses, estado_actual, privado, foto_perfil)
+app.put("/api/perfil/:id", async (req, res) => {
+  const { username, bio, carrera, ciclo, genero, intereses, estado_actual, privado, foto_perfil } = req.body;
+  const codigo_usu = req.params.id;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Actualizar username si se envió
+    if (username && username.trim()) {
+      // Verificar que no esté tomado por otro usuario
+      const existente = await client.query(
+        `SELECT codigo_usu FROM usuarios WHERE LOWER(username) = LOWER($1) AND codigo_usu != $2`,
+        [username.trim(), codigo_usu]
+      );
+      if (existente.rows.length > 0) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          success: false,
+          error: "Ese nombre de usuario ya está en uso. Elige otro.",
+        });
+      }
+      await client.query(
+        `UPDATE usuarios SET username = $1 WHERE codigo_usu = $2`,
+        [username.trim(), codigo_usu]
+      );
+    }
+
+    // Actualizar campos de perfil_usuario (upsert)
+    await client.query(
+      `
+      INSERT INTO perfil_usuario (codigo_usu, bio, carrera, ciclo, genero, intereses, estado_actual, privado, foto_perfil)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      ON CONFLICT (codigo_usu) DO UPDATE SET
+        bio          = COALESCE(EXCLUDED.bio, perfil_usuario.bio),
+        carrera      = COALESCE(EXCLUDED.carrera, perfil_usuario.carrera),
+        ciclo        = COALESCE(EXCLUDED.ciclo, perfil_usuario.ciclo),
+        genero       = COALESCE(EXCLUDED.genero, perfil_usuario.genero),
+        intereses    = COALESCE(EXCLUDED.intereses, perfil_usuario.intereses),
+        estado_actual= COALESCE(EXCLUDED.estado_actual, perfil_usuario.estado_actual),
+        privado      = COALESCE(EXCLUDED.privado, perfil_usuario.privado),
+        foto_perfil  = COALESCE(EXCLUDED.foto_perfil, perfil_usuario.foto_perfil)
+      `,
+      [
+        codigo_usu,
+        bio !== undefined ? bio : null,
+        carrera !== undefined ? carrera : null,
+        ciclo !== undefined ? ciclo : null,
+        genero !== undefined ? genero : null,
+        intereses !== undefined ? intereses : null,
+        estado_actual !== undefined ? estado_actual : null,
+        privado !== undefined ? privado : null,
+        foto_perfil !== undefined ? foto_perfil : null,
+      ]
+    );
+
+    await client.query("COMMIT");
+    res.json({ success: true });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -304,7 +477,8 @@ app.post("/api/sesion/cerrar", async (req, res) => {
 // que de verdad identifica la cuenta dentro de la app.
 app.post("/api/auth/login", async (req, res) => {
   const { codigo_estudiante, password } = req.body;
-  const cleanCodigo = (codigo_estudiante || "").trim().toUpperCase();
+  const cleanCodigo = (codigo_estudiante || "").trim().toLowerCase().replace(/@.*$/, "");
+  const correoReconstruido = `${cleanCodigo}@utp.edu.pe`;
 
   if (!cleanCodigo || !password) {
     return res.status(400).json({
@@ -326,9 +500,9 @@ app.post("/api/auth/login", async (req, res) => {
         p.intereses
       FROM usuarios u
       LEFT JOIN perfil_usuario p ON p.codigo_usu = u.codigo_usu
-      WHERE UPPER(u.correo) = $1
+      WHERE LOWER(u.correo) = $1
       `,
-      [cleanCodigo]
+      [correoReconstruido]
     );
 
     if (result.rows.length === 0) {
@@ -385,8 +559,22 @@ app.get("/health", (_, res) => res.json({ status: "ok" }));
 const PORT = process.env.PORT || 3000;
 
 pool.connect()
-  .then(() => {
+  .then(async (client) => {
     console.log("✅ Conectado a PostgreSQL/Supabase");
+    try {
+      await client.query(`
+        ALTER TABLE perfil_usuario 
+        ADD COLUMN IF NOT EXISTS bio TEXT,
+        ADD COLUMN IF NOT EXISTS estado_actual TEXT,
+        ADD COLUMN IF NOT EXISTS privado BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS foto_perfil TEXT;
+      `);
+      console.log("✅ Columnas de perfil_usuario verificadas/creadas");
+    } catch (e) {
+      console.warn("⚠️ No se pudieron crear las columnas adicionales:", e.message);
+    } finally {
+      client.release();
+    }
   })
   .catch((err) => {
     console.error("❌ Error de conexión:", err.message);
